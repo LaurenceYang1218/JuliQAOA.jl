@@ -8,16 +8,15 @@ using CUDA
 using CUDA: i32
 
 Random.seed!(1)
-n = 10
-pround = 5
+n = parse(Int64, ARGS[1])
+pround = parse(Int64, ARGS[2])
 
 angle = rand(2*pround) .* 2π
 graph = erdos_renyi(n, 0.5)
 
 mixer = mixer_x(n)
 obj_vals = [maxcut(graph, x) for x in states(n)]
-
-println("n: $(n), pround: $(pround)")
+println("numQubits: $(n), pround: $(pround)")
 
 function initH(mixer::Mixer{X})
     sv = ones(ComplexF64, mixer.N)/sqrt(mixer.N)
@@ -181,8 +180,23 @@ end
 f(x) = -exp_value(x, mixer, obj_vals)/maximum(obj_vals)
 f2(x) = -circuit(n, pround, x, mixer, obj_vals)/maximum(obj_vals)
 
-println("Approximation ratio circuit: $(circuit(n, pround, angle, mixer, obj_vals)/maximum(obj_vals))")
-println("Approximation ratio exp_value: $(exp_value(angle, mixer, obj_vals)/maximum(obj_vals))")
+println("Approximation ratio circuit (random angle): $(circuit(n, pround, angle, mixer, obj_vals)/maximum(obj_vals))")
+println("Approximation ratio exp_value (random angle): $(exp_value(angle, mixer, obj_vals)/maximum(obj_vals))")
+
+latency = []
+
+function grad!(G::Vector, angles::Vector, mixer::Mixer, obj_vals::AbstractVector, measure::AbstractVector=obj_vals; flip_sign=false)
+    sv = ones(ComplexF64, mixer.N)/sqrt(mixer.N)
+    grad!(G, sv, angles, mixer, obj_vals, measure; flip_sign=flip_sign)
+end
+
+function grad!(G::Vector, sv::Vector, angles::Vector, mixer::Mixer, obj_vals::AbstractVector, measure::AbstractVector=obj_vals; flip_sign=false)
+    sv_copy = copy(sv)
+    dsv = zeros(ComplexF64, mixer.N)
+    G .= 0.0
+    f(a,b) = (flip_sign ? -1 : 1)*exp_value!(a, b, mixer, obj_vals, measure)
+    push!(latency, @elapsed Enzyme.autodiff(Reverse, f, Duplicated(sv_copy, dsv), Duplicated(angles, G))) # time measurement
+end
 
 function g!(G, x)
     G .= 0
@@ -194,12 +208,21 @@ function g!(G, x)
     G .+= tmpG/maximum(obj_vals)
 end
 
+# minimizer = optimize(f, g!, angle, BFGS(linesearch=LineSearches.BackTracking()), Optim.Options(show_trace=true, iterations=100))
 minimizer = optimize(f, g!, angle, BFGS(linesearch=LineSearches.BackTracking()))
 optim_angle = Optim.minimizer(minimizer)
 
+println("Measure latency of GPU:")
+@time circuit(n, pround, optim_angle, mixer, obj_vals)
+println("Measure latency of CPU:")
+@time exp_value(optim_angle, mixer, obj_vals)
+
+popfirst!(latency)
+println("Measure latency of Optimizer (avg):")
+println(mean(latency))
+
+
 approx = circuit(n, pround, optim_angle, mixer, obj_vals)/maximum(obj_vals)
-println("Approximation ratio circuit (optimized): $(approx)")
-
+println("Approximation ratio circuit (optimized angle): $(approx)")
 approx = exp_value(optim_angle, mixer, obj_vals)/maximum(obj_vals)
-println("Approximation ratio exp_value (optimized): $(approx)")
-
+println("Approximation ratio exp_value (optimized angle): $(approx)")
